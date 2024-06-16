@@ -1,0 +1,21 @@
+fastapi
+uvicorn
+websockets
+transformers
+accelerate 
+datasets[audio]
+open-interpreter
+ngrok
+pillow
+accelerate
+aiohttp
+datasets[audio]
+datasets
+requests
+torch
+uvicorn
+pyttsx3
+openai
+pypiwin32
+python-multipart
+-e git+https://github.com/coqui-ai/TTS#egg=TTS[all,dev,notebooks]
