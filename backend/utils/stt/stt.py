@@ -1,36 +1,52 @@
 # backend/utils/stt/stt.py
 
+import os
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-from io import BytesIO
-import soundfile as sf
+from faster_whisper import WhisperModel
+import tempfile
+import logging
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+# Disable symbolic links on Windows for huggingface_hub
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-model_id = "distil-whisper/distil-large-v3"
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-model = AutoModelForSpeechSeq2Seq.from_pretrained(
-    model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True, trust_remote_code=True
-)
-model.to(device)
+# Define torch configuration
+device = "cuda" if torch.cuda.is_available() else "cpu"
+compute_type = "float16" if torch.cuda.is_available() else "float32"
 
-processor = AutoProcessor.from_pretrained(model_id)
-
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model=model,
-    tokenizer=processor.tokenizer,
-    feature_extractor=processor.feature_extractor,
-    max_new_tokens=256,
-    torch_dtype=torch_dtype,
-    device=device,
-)
+# Load Faster-Whisper model
+model = WhisperModel("distil-large-v3", device=device, compute_type=compute_type)
 
 def audio_to_text(audio_data: bytes) -> str:
-    audio_stream = BytesIO(audio_data)
-    audio_array, sample_rate = sf.read(audio_stream)
-    if len(audio_array.shape) > 1 and audio_array.shape[1] == 2:
-        audio_array = audio_array.mean(axis=1)  # Convert to mono if stereo
-    result = pipe(audio_array, sampling_rate=sample_rate)
-    return result["text"]
+    try:
+        # Create a temporary file to store the audio data
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio_file:
+            temp_audio_file.write(audio_data)
+            temp_audio_file_path = temp_audio_file.name
+
+        # Ensure the file is closed before transcribing
+        transcription = ""
+
+        try:
+            # Transcribe the audio file
+            segments, info = model.transcribe(temp_audio_file_path, beam_size=1)
+
+            # Combine all segments into a single transcription text
+            transcription = "".join(segment.text for segment in segments)
+            logger.info(f"Transcription completed: {transcription}")
+
+        except Exception as e:
+            logger.error(f"Error transcribing audio: {e}")
+        
+        finally:
+            # Ensure the temporary file is deleted
+            os.remove(temp_audio_file_path)
+
+        return transcription
+
+    except Exception as e:
+        logger.error(f"General error in audio_to_text: {e}")
+        return ""
