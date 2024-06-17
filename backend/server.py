@@ -1,154 +1,265 @@
-import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-import uvicorn
-import logging
-from utils.stt.stt import audio_to_text
-from fastapi.responses import FileResponse
-from queue import Queue
-from threading import Thread
-import os
-from datetime import datetime
-from TTS.api import TTS
-import torch
-import tempfile
-import requests
+import React, { useState, useEffect } from "react";
+import {
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  View,
+  Alert,
+  ActivityIndicator,
+  ScrollView,
+  ImageBackground,
+  TouchableOpacity
+} from "react-native";
+import FontAwesome from "@expo/vector-icons/FontAwesome";
+import * as Permissions from "expo-permissions";
+import { Audio, InterruptionModeIOS } from "expo-av";
+import * as FileSystem from "expo-file-system";
 
-app = FastAPI()
+//const SERVER_URL = "ws://192.168.1.224:8015/ws";
+//const AUDIO_URL = "http://192.168.1.224:8015/audio";
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+const App = () => {
+  const [connection, setConnection] = useState(null);
+  const [recording, setRecording] = useState(null);
+  const [responseText, setResponseText] = useState("");
+  const [codeSnippet, setCodeSnippet] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [sound, setSound] = useState();
+  const [status, setStatus] = useState("Idle");
 
-class WebSocketManager:
-    def __init__(self):
-        self.active_connections = []
-        print("WebSocketManager initialized")
+  useEffect(() => {
+    const requestPermissions = async () => {
+      const { status } = await Permissions.askAsync(
+        Permissions.AUDIO_RECORDING
+      );
+      if (status !== "granted") {
+        Alert.alert("Permissions not granted");
+      }
+    };
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        print("Connected to websocket")
+    const setAudioMode = async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: true,
+          interruptionModeIOS: InterruptionModeIOS.DuckOthers
+        });
+        console.log("Audio mode set");
+      } catch (error) {
+        console.log("Failed to set audio mode", error);
+      }
+    };
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections = [conn for conn in self.active_connections if conn != websocket]
-        print("Disconnected from websocket")
+    requestPermissions();
+    setAudioMode();
 
-    async def send_message(self, websocket: WebSocket, message: str):
-        try:
-            await websocket.send_text(message)
-            print(f"Sent message: {message}")
-        except RuntimeError as e:
-            logger.error(f"Failed to send message: {e}")
+    return () => {
+      if (recording) {
+        recording.stopAndUnloadAsync();
+      }
+      if (sound) {
+        sound.unloadAsync();
+      }
+    };
+  }, []);
 
-    async def send_audio_info(self, websocket: WebSocket, filename: str):
-        try:
-            await websocket.send_text(f'{{"status": 200, "message": "TTS Generation Success", "filename": "{filename}"}}')
-            print(f"Sent success message with filename: {filename}")
-        except RuntimeError as e:
-            logger.error(f"Failed to send audio info: {e}")
+  const startConnection = async () => {
+    const socket = new WebSocket(SERVER_URL);
 
-manager = WebSocketManager()
+    socket.onopen = () => {
+      console.log("Connected to server");
+      setStatus("Connected to server");
+    };
 
-# Initialize the audio queue
-audio_queue = Queue()
+    socket.onmessage = async (event) => {
+      if (typeof event.data === "string") {
+        const message = JSON.parse(event.data);
+        setResponseText(message.text);
+        setCodeSnippet(message.text);
+        if (message.status === 200) {
+          console.log("TTS Generation Success..");
+          setStatus("Audio received");
+          await retrieveAndPlayAudio(message.filename);
+        }
+      }
+    };
 
-async def generate_tts_and_enqueue(websocket: WebSocket, response_text: str):
-    sentences = response_text.split('. ')
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if sentence:
-            timestamp = datetime.now().strftime("%m-%d-%Y-%I_%M%p-%f")
-            filename = f"audio_files/{timestamp}.wav"
-            try:
-                tts.tts_to_file(
-                    text=sentence + '.',  # Ensure each chunk ends with a period
-                    speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\colin.wav",
-                    file_path=filename,
-                    speed=0.9,
-                    temperature=0.3,
-                    top_k=75,
-                    top_p=0.9,
-                    split_sentences=True,
-                    language="en"
-                )
-                print(f"Generated TTS file: {filename}")
-                audio_queue.put(filename)
-                await manager.send_audio_info(websocket, os.path.basename(filename))
-                return 200, (f"Generated TTS file: {filename}")
-            except Exception as e:
-                print(f"Error generating TTS: {e}")
+    socket.onclose = () => {
+      console.log("Disconnected from server");
+      setStatus("Disconnected from server");
+    };
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    print("Connected to websocket")
-    try:
-        while True:
-            message = await websocket.receive()
-            print(f"Message received: {message}")
-        
-            if message["type"] == "websocket.receive" and "bytes" in message:
-                audio_data = message["bytes"]
-                print("Received audio data")
-            
-                text = audio_to_text(audio_data)
-                print(f"Converted audio to text: {text}")
-            
-                response_text = await query_llm(text)
-                print(f"Response from LLM: {response_text}")
-            
-                await manager.send_message(websocket, response_text)
-                await generate_tts_and_enqueue(websocket, response_text)
-        
-            elif message["type"] == "websocket.receive" and "text" in message:
-                text = message["text"]
-                print(f"Received text: {text}")
-            
-                response_text = await query_llm(text)
-                print(f"Response from LLM: {response_text}")
-            
-                await manager.send_message(websocket, response_text)
-                await generate_tts_and_enqueue(websocket, response_text)
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"Error handling websocket: {e}")
+    setConnection({ socket });
+  };
 
-@app.get("/audio/{audio_file_name}")
-async def get_audio(audio_file_name: str):
-    print(f"Received request for audio file: {audio_file_name}")
-    file_path = f"audio_files/{audio_file_name}"
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    print(f"Serving audio file from: {file_path}")
-    return FileResponse(file_path, media_type="audio/wav")
+  const startRecording = async () => {
+    try {
+      console.log("Requesting permissions..");
+      await Audio.requestPermissionsAsync();
 
-async def query_llm(text: str):
-    try:
-        from openai import OpenAI
-        client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
+      console.log("Starting recording..");
+      setStatus("Recording");
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers
+      });
 
-        completion = client.chat.completions.create(
-            model="model-identifier",
-            messages=[
-                {"role": "system", "content": "You are an AI personal assistant that is connected to the user via their mobile device."},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.3,
-        )
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RECORDING_OPTIONS_PRESET_HIGH_QUALITY
+      );
+      setRecording(recording);
+      console.log("Recording started");
+    } catch (err) {
+      console.error("Failed to start recording", err);
+    }
+  };
 
-        response = completion.choices[0].message.content
-        return response
-    
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP error occurred: {e}")
-        return "An error occurred while querying the language model."
-    except Exception as e:
-        logger.error(f"General error occurred: {e}")
-        return "A general error occurred while querying the language model."
+  const stopRecording = async () => {
+    console.log("Stopping recording..");
+    setStatus("Processing");
+    setRecording(undefined);
+    await recording.stopAndUnloadAsync();
 
-if __name__ == "__main__":
-    logger.info("Starting WebSocket server...")
-    uvicorn.run(app, host="0.0.0.0", port=8015)
+    const uri = recording.getURI();
+    console.log("Recording stopped and stored at", uri);
+    sendAudio(uri);
+  };
+
+  const sendAudio = async (uri) => {
+    if (!connection || !connection.socket) return;
+
+    try {
+      const audioData = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64
+      });
+
+      const binaryAudio = Uint8Array.from(atob(audioData), (c) =>
+        c.charCodeAt(0)
+      );
+
+      connection.socket.send(binaryAudio.buffer);
+    } catch (error) {
+      console.error("Failed to send audio", error);
+    }
+  };
+
+  const retrieveAndPlayAudio = async (filename) => {
+    console.log("Retrieving audio from server");
+    setStatus("Playing audio");
+    setLoading(true);
+    try {
+      const audioUrl = `${AUDIO_URL}/${filename}`;
+
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: audioUrl },
+        { shouldPlay: true }
+      );
+      setSound(newSound);
+      await newSound.playAsync();
+    } catch (error) {
+      console.log("Failed to play sound", error);
+    } finally {
+      setLoading(false);
+      setStatus("Idle");
+    }
+  };
+
+  return (
+    <ImageBackground source={require("./assets/bg1.png")} style={{ flex: 1 }}>
+      <SafeAreaView style={styles.container}>
+        <Text style={styles.title}>Mr Gadgets</Text>
+        <Text style={styles.status}>{status}</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
+          <TouchableOpacity onPress={startConnection}>
+            <FontAwesome
+              name="connectdevelop"
+              size={65}
+              color={connection ? "green" : "white"}
+              style={{
+                marginTop: 30,
+                marginBottom: 30,
+                marginRight: 50
+              }}
+            />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={recording ? stopRecording : startRecording}
+          >
+            <FontAwesome
+              name="microphone"
+              size={65}
+              color={recording ? "red" : "white"}
+              style={{ marginTop: 30, marginBottom: 30 }}
+            />
+          </TouchableOpacity>
+        </View>
+        <ScrollView style={styles.responseContainer}>
+          <Text style={styles.response}>{responseText}</Text>
+          {loading && <ActivityIndicator size="large" color="#0000ff" />}
+        </ScrollView>
+        <ScrollView style={styles.codeContainer}>
+          <Text style={styles.codeTitle}>Code Snippet</Text>
+          <Text style={styles.code}>{codeSnippet}</Text>
+        </ScrollView>
+      </SafeAreaView>
+    </ImageBackground>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center"
+  },
+  title: {
+    fontWeight: "bold",
+    fontFamily: "roboto-mono",
+    marginTop: 20,
+    fontSize: 24,
+    marginBottom: 20,
+    color: "#ffffff"
+  },
+  status: {
+    fontSize: 18,
+    color: "#ffffff",
+    marginBottom: 10
+  },
+  responseContainer: {
+    marginTop: 20,
+    padding: 10,
+    backgroundColor: "#5d5d5d",
+    borderRadius: 5,
+    width: "90%",
+    height: "30%"
+  },
+  response: {
+    fontSize: 18
+  },
+  codeContainer: {
+    marginTop: 20,
+    padding: 10,
+    color: "#04ff00",
+    backgroundColor: "#000000",
+    borderRadius: 5,
+    width: "90%",
+    height: "30%",
+    fontSize: 14,
+    fontFamily: "courier-mono"
+  },
+  codeTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 10,
+    color: "#ffffff"
+  },
+  code: {
+    fontFamily: "roboto-mono",
+    fontSize: 16
+  }
+});
+
+export default App;
