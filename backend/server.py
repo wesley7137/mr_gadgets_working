@@ -1,21 +1,23 @@
-# backend/server.py
-
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 import logging
 from utils.stt.stt import audio_to_text
-from utils.tts.tts_simple import generate_tts
 import requests
 from TTS.api import TTS
 import torch
-
-
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def generate_tts(text: str) -> bytes:
+    model_name = "tts_models/en/ljspeech/tacotron2-DDC"
+    tts = TTS(model_name)
+    wav = tts.tts(text)
+    return wav
 
 class WebSocketManager:
     def __init__(self):
@@ -28,18 +30,22 @@ class WebSocketManager:
         print("Connected to websocket")
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        self.active_connections = [conn for conn in self.active_connections if conn != websocket]
         print("Disconnected from websocket")
 
-    async def send_message(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
-        print(f"Sent message: {message}")
+    async def send_message(self, websocket: WebSocket, message: str):
+        try:
+            await websocket.send_text(message)
+            print(f"Sent message: {message}")
+        except RuntimeError as e:
+            logger.error(f"Failed to send message: {e}")
 
-    async def send_audio(self, audio_data: bytes):
-        for connection in self.active_connections:
-            await connection.send_bytes(audio_data)
-        print("Sent audio data")
+    async def send_audio(self, websocket: WebSocket, audio_data: bytes):
+        try:
+            await websocket.send_bytes(audio_data)
+            print("Sent audio data")
+        except RuntimeError as e:
+            logger.error(f"Failed to send audio: {e}")
 
 manager = WebSocketManager()
 
@@ -50,45 +56,32 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
-            print(f"Received message: {message}")
             if message["type"] == "websocket.receive" and "bytes" in message:
                 audio_data = message["bytes"]
                 print("Received audio data")
                 text = audio_to_text(audio_data)
-                print(f"Converted audio to text: {text}")
                 response_text = await query_llm(text)
-                print(f"Received response from LLM: {response_text}")
-                if is_code(response_text):
-                    await manager.send_message(response_text)
-                    print("Sent code response")
-                else:
-                    audio_file = generate_tts(response_text)
-                    with open(audio_file, 'rb') as f:
-                        audio_content = f.read()
-                    print("Generated TTS audio")
-                    await manager.send_audio(audio_content)
-                    print("Sent audio response")
+                audio_data = generate_tts(response_text)
+                await manager.send_message(websocket, response_text)
+                await manager.send_message(websocket, '{"status": 200, "message": "TTS Generation Success"}')
+
             elif message["type"] == "websocket.receive" and "text" in message:
                 text = message["text"]
-                print(f"Received text: {text}")
                 response_text = await query_llm(text)
-                print(f"Received response from LLM: {response_text}")
-                if is_code(response_text):
-                    await manager.send_message(response_text)
-                    print("Sent code response")
-                else:
-                    audio_file = generate_tts(response_text)
-                    with open(audio_file, 'rb') as f:
-                        audio_content = f.read()
-                    print("Generated TTS audio")
-                    await manager.send_audio(audio_content)
-                    print("Sent audio response")
+                audio_data = generate_tts(response_text)
+                await manager.send_message(websocket, response_text)
+                await manager.send_message(websocket, '{"status": 200, "message": "TTS Generation Success"}')
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        print("Disconnected from websocket")
     except Exception as e:
         logger.error(f"Error handling websocket: {e}")
-        await manager.send_message("An error occurred while processing your request.")
+
+@app.get("/audio/{audio_file_name}")
+async def get_audio(audio_file_name: str):
+    print(f"Received request for audio file: {audio_file_name}")
+    file_path = f"{audio_file_name}"
+    print(f"Serving audio file from: {file_path}")
+    return FileResponse(file_path, media_type="audio/wav")
 
 async def query_llm(text: str):
     try:
@@ -121,4 +114,4 @@ def is_code(text: str) -> bool:
 
 if __name__ == "__main__":
     logger.info("Starting WebSocket server...")
-    uvicorn.run(app, host="0.0.0.0", port=8008)
+    uvicorn.run(app, host="0.0.0.0", port=8015)
