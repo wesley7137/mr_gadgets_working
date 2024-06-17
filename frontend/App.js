@@ -2,13 +2,15 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   SafeAreaView,
   StyleSheet,
-  Button,
   Text,
   View,
   Alert,
   ActivityIndicator,
   ScrollView
 } from "react-native";
+import { Button } from "react-native-paper";
+import FontAwesome from "@expo/vector-icons/FontAwesome";
+
 import * as Permissions from "expo-permissions";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system";
@@ -50,7 +52,9 @@ const App = () => {
         setResponseText(event.data);
         setCodeSnippet(event.data);
       } else {
-        playAudio(event.data);
+        const reader = new FileReader();
+        reader.onload = () => playAudio(reader.result);
+        reader.readAsArrayBuffer(event.data); // Read the binary data as ArrayBuffer
       }
     };
 
@@ -96,10 +100,15 @@ const App = () => {
     if (!connection || !connection.socket) return;
 
     try {
+      // Read the audio file as binary data
       const audioData = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64
       });
-      connection.socket.send(audioData); // Ensure audioData is sent as binary
+
+      const binaryAudio = Uint8Array.from(atob(audioData), (c) =>
+        c.charCodeAt(0)
+      );
+      connection.socket.send(binaryAudio);
     } catch (error) {
       console.error("Failed to send audio", error);
     }
@@ -124,12 +133,35 @@ const App = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>Voice Assistant</Text>
-      <Button title="Start Connection" onPress={startConnection} />
-      <Button
-        title={recording ? "Stop Recording" : "Start Recording"}
-        onPress={recording ? stopRecording : startRecording}
-      />
+      <Text style={styles.title}>Mr Gadgets</Text>
+      <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
+        <Button
+          onPress={startConnection}
+          icon={() => (
+            <FontAwesome
+              name="connectdevelop"
+              size={65}
+              color={connection ? "green" : "white"}
+              style={{
+                marginTop: 30,
+                marginBottom: 30,
+                marginRight: 50
+              }}
+            />
+          )}
+        />
+        <Button
+          onPress={recording ? stopRecording : startRecording}
+          icon={() => (
+            <FontAwesome
+              name="microphone"
+              size={65}
+              color={recording ? "red" : "white"}
+              style={{ marginTop: 30, marginBottom: 30 }}
+            />
+          )}
+        />
+      </View>
       <ScrollView style={styles.responseContainer}>
         <Text style={styles.response}>{responseText}</Text>
         {loading && <ActivityIndicator size="large" color="#0000ff" />}
@@ -147,16 +179,29 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#fff"
+    backgroundColor: "#222222"
   },
   title: {
+    fontWeight: "bold",
+    fontFamily: "roboto-mono",
+    marginTop: 20,
     fontSize: 24,
-    marginBottom: 20
+    marginBottom: 20,
+    color: "#ffffff"
+  },
+  button: {
+    marginTop: 20,
+    fontWeight: "bold",
+    fontFamily: "roboto-mono",
+    marginTop: 20,
+    fontSize: 20,
+    marginBottom: 20,
+    color: "#ffffff"
   },
   responseContainer: {
     marginTop: 20,
     padding: 10,
-    backgroundColor: "#f0f0f0",
+    backgroundColor: "#5d5d5d",
     borderRadius: 5,
     width: "90%",
     height: "30%"
@@ -167,18 +212,22 @@ const styles = StyleSheet.create({
   codeContainer: {
     marginTop: 20,
     padding: 10,
-    backgroundColor: "#f5f5f5",
+    color: "#04ff00",
+    backgroundColor: "#000000",
     borderRadius: 5,
     width: "90%",
-    height: "30%"
+    height: "30%",
+    fontSize: 14,
+    fontFamily: "courier-mono"
   },
   codeTitle: {
     fontSize: 20,
     fontWeight: "bold",
-    marginBottom: 10
+    marginBottom: 10,
+    color: "#ffffff"
   },
   code: {
-    fontFamily: "monospace",
+    fontFamily: "roboto-mono",
     fontSize: 16
   }
 });
