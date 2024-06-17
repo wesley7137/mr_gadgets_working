@@ -15,8 +15,9 @@ import * as Permissions from "expo-permissions";
 import { Audio, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system";
 
-const SERVER_URL = "ws://192.168.1.224:8015/ws";
-const AUDIO_URL = "http://192.168.1.224:8015/audio/temp_generated_audio.wav";
+//const SERVER_URL = "ws://192.168.1.224:8015/ws";
+//const AUDIO_URL = "http://192.168.1.224:8015/audio";
+
 
 const App = () => {
   const [connection, setConnection] = useState(null);
@@ -77,8 +78,9 @@ const App = () => {
         setResponseText(message.text);
         setCodeSnippet(message.text);
         if (message.status === 200) {
+          console.log("TTS Generation Success..");
           setStatus("Audio received");
-          await retrieveAndPlayAudio();
+          await retrieveAndPlayAudio(message.filename);
         }
       }
     };
@@ -139,31 +141,20 @@ const App = () => {
       );
 
       connection.socket.send(binaryAudio.buffer);
-
-      // Wait for a response from the server
-      connection.socket.onmessage = async (event) => {
-        const response = JSON.parse(event.data);
-
-        // If the server responds with a success message, call the retrieveAndPlayAudio function
-        if (response.status === 200) {
-          console.log("TTS Generation Success..");
-          setStatus("Audio received");
-          await retrieveAndPlayAudio();
-        }
-        console.log("Retrieved and Played Audio..");
-      };
     } catch (error) {
       console.error("Failed to send audio", error);
     }
   };
 
-  const retrieveAndPlayAudio = async () => {
+  const retrieveAndPlayAudio = async (filename) => {
     console.log("Retrieving audio from server");
     setStatus("Playing audio");
     setLoading(true);
     try {
+      const audioUrl = `${AUDIO_URL}/${filename}`;
+
       const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: AUDIO_URL },
+        { uri: audioUrl },
         { shouldPlay: true }
       );
       setSound(newSound);
