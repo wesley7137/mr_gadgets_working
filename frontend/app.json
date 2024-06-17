@@ -15,6 +15,9 @@
     },
     "assetBundlePatterns": ["**/*"],
     "ios": {
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"]
+      },
       "supportsTablet": true
     },
     "android": {
