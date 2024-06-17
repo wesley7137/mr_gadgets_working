@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -6,16 +6,17 @@ import {
   View,
   Alert,
   ActivityIndicator,
-  ScrollView
+  ScrollView,
+  ImageBackground,
+  TouchableOpacity
 } from "react-native";
-import { Button } from "react-native-paper";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
-
 import * as Permissions from "expo-permissions";
-import { Audio } from "expo-av";
+import { Audio, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system";
 
-const SERVER_URL = "ws://192.168.1.224:8008/ws";
+const SERVER_URL = "ws://192.168.1.224:8015/ws";
+const AUDIO_URL = "http://192.168.1.224:8015/audio/temp_generated_audio.wav";
 
 const App = () => {
   const [connection, setConnection] = useState(null);
@@ -23,43 +24,68 @@ const App = () => {
   const [responseText, setResponseText] = useState("");
   const [codeSnippet, setCodeSnippet] = useState("");
   const [loading, setLoading] = useState(false);
+  const [sound, setSound] = useState();
+  const [status, setStatus] = useState("Idle");
 
   useEffect(() => {
+    const requestPermissions = async () => {
+      const { status } = await Permissions.askAsync(
+        Permissions.AUDIO_RECORDING
+      );
+      if (status !== "granted") {
+        Alert.alert("Permissions not granted");
+      }
+    };
+
+    const setAudioMode = async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: true,
+          interruptionModeIOS: InterruptionModeIOS.DuckOthers
+        });
+        console.log("Audio mode set");
+      } catch (error) {
+        console.log("Failed to set audio mode", error);
+      }
+    };
+
     requestPermissions();
+    setAudioMode();
+
     return () => {
       if (recording) {
         recording.stopAndUnloadAsync();
       }
+      if (sound) {
+        sound.unloadAsync();
+      }
     };
   }, []);
-
-  const requestPermissions = async () => {
-    const { status } = await Permissions.askAsync(Permissions.AUDIO_RECORDING);
-    if (status !== "granted") {
-      Alert.alert("Permissions not granted");
-    }
-  };
 
   const startConnection = async () => {
     const socket = new WebSocket(SERVER_URL);
 
     socket.onopen = () => {
       console.log("Connected to server");
+      setStatus("Connected to server");
     };
 
-    socket.onmessage = (event) => {
+    socket.onmessage = async (event) => {
       if (typeof event.data === "string") {
-        setResponseText(event.data);
-        setCodeSnippet(event.data);
-      } else {
-        const reader = new FileReader();
-        reader.onload = () => playAudio(reader.result);
-        reader.readAsArrayBuffer(event.data); // Read the binary data as ArrayBuffer
+        const message = JSON.parse(event.data);
+        setResponseText(message.text);
+        setCodeSnippet(message.text);
+        if (message.status === 200) {
+          setStatus("Audio received");
+          await retrieveAndPlayAudio();
+        }
       }
     };
 
     socket.onclose = () => {
       console.log("Disconnected from server");
+      setStatus("Disconnected from server");
     };
 
     setConnection({ socket });
@@ -71,9 +97,12 @@ const App = () => {
       await Audio.requestPermissionsAsync();
 
       console.log("Starting recording..");
+      setStatus("Recording");
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
-        playsInSilentModeIOS: true
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers
       });
 
       const { recording } = await Audio.Recording.createAsync(
@@ -88,6 +117,7 @@ const App = () => {
 
   const stopRecording = async () => {
     console.log("Stopping recording..");
+    setStatus("Processing");
     setRecording(undefined);
     await recording.stopAndUnloadAsync();
 
@@ -100,7 +130,6 @@ const App = () => {
     if (!connection || !connection.socket) return;
 
     try {
-      // Read the audio file as binary data
       const audioData = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64
       });
@@ -108,36 +137,52 @@ const App = () => {
       const binaryAudio = Uint8Array.from(atob(audioData), (c) =>
         c.charCodeAt(0)
       );
-      connection.socket.send(binaryAudio);
+
+      connection.socket.send(binaryAudio.buffer);
+
+      // Wait for a response from the server
+      connection.socket.onmessage = async (event) => {
+        const response = JSON.parse(event.data);
+
+        // If the server responds with a success message, call the retrieveAndPlayAudio function
+        if (response.status === 200) {
+          console.log("TTS Generation Success..");
+          setStatus("Audio received");
+          await retrieveAndPlayAudio();
+        }
+        console.log("Retrieved and Played Audio..");
+      };
     } catch (error) {
       console.error("Failed to send audio", error);
     }
   };
 
-  const playAudio = async (audioData) => {
+  const retrieveAndPlayAudio = async () => {
+    console.log("Retrieving audio from server");
+    setStatus("Playing audio");
     setLoading(true);
     try {
-      const sound = new Audio.Sound();
-      const uri = FileSystem.documentDirectory + "response.wav";
-      await FileSystem.writeAsStringAsync(uri, audioData, {
-        encoding: FileSystem.EncodingType.Base64
-      });
-      await sound.loadAsync({ uri });
-      await sound.playAsync();
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: AUDIO_URL },
+        { shouldPlay: true }
+      );
+      setSound(newSound);
+      await newSound.playAsync();
     } catch (error) {
       console.log("Failed to play sound", error);
     } finally {
       setLoading(false);
+      setStatus("Idle");
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>Mr Gadgets</Text>
-      <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
-        <Button
-          onPress={startConnection}
-          icon={() => (
+    <ImageBackground source={require("./assets/bg1.png")} style={{ flex: 1 }}>
+      <SafeAreaView style={styles.container}>
+        <Text style={styles.title}>Mr Gadgets</Text>
+        <Text style={styles.status}>{status}</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
+          <TouchableOpacity onPress={startConnection}>
             <FontAwesome
               name="connectdevelop"
               size={65}
@@ -148,29 +193,28 @@ const App = () => {
                 marginRight: 50
               }}
             />
-          )}
-        />
-        <Button
-          onPress={recording ? stopRecording : startRecording}
-          icon={() => (
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={recording ? stopRecording : startRecording}
+          >
             <FontAwesome
               name="microphone"
               size={65}
               color={recording ? "red" : "white"}
               style={{ marginTop: 30, marginBottom: 30 }}
             />
-          )}
-        />
-      </View>
-      <ScrollView style={styles.responseContainer}>
-        <Text style={styles.response}>{responseText}</Text>
-        {loading && <ActivityIndicator size="large" color="#0000ff" />}
-      </ScrollView>
-      <ScrollView style={styles.codeContainer}>
-        <Text style={styles.codeTitle}>Code Snippet</Text>
-        <Text style={styles.code}>{codeSnippet}</Text>
-      </ScrollView>
-    </SafeAreaView>
+          </TouchableOpacity>
+        </View>
+        <ScrollView style={styles.responseContainer}>
+          <Text style={styles.response}>{responseText}</Text>
+          {loading && <ActivityIndicator size="large" color="#0000ff" />}
+        </ScrollView>
+        <ScrollView style={styles.codeContainer}>
+          <Text style={styles.codeTitle}>Code Snippet</Text>
+          <Text style={styles.code}>{codeSnippet}</Text>
+        </ScrollView>
+      </SafeAreaView>
+    </ImageBackground>
   );
 };
 
@@ -178,8 +222,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#222222"
+    alignItems: "center"
   },
   title: {
     fontWeight: "bold",
@@ -189,14 +232,10 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     color: "#ffffff"
   },
-  button: {
-    marginTop: 20,
-    fontWeight: "bold",
-    fontFamily: "roboto-mono",
-    marginTop: 20,
-    fontSize: 20,
-    marginBottom: 20,
-    color: "#ffffff"
+  status: {
+    fontSize: 18,
+    color: "#ffffff",
+    marginBottom: 10
   },
   responseContainer: {
     marginTop: 20,
