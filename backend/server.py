@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 import uvicorn
 import logging
@@ -12,6 +13,7 @@ from TTS.api import TTS
 import torch
 import requests
 import llm
+
 app = FastAPI()
 
 logging.basicConfig(level=logging.INFO)
@@ -48,10 +50,25 @@ class WebSocketManager:
         except RuntimeError as e:
             logger.error(f"Failed to send audio info: {e}")
 
+    async def send_audio_data(self, websocket: WebSocket, audio_data: bytes):
+        try:
+            await websocket.send_bytes(audio_data)
+            print("Sent audio data")
+        except RuntimeError as e:
+            logger.error(f"Failed to send audio data: {e}")
+
 manager = WebSocketManager()
 
 # Initialize the audio queue
 audio_queue = Queue()
+
+async def send_audio_data_async(websocket, filename):
+    try:
+        with open(filename, 'rb') as file:
+            audio_data = file.read()
+            await manager.send_audio_data(websocket, audio_data)
+    except Exception as e:
+        print(f"Error sending audio data: {e}")
 
 def tts_worker():
     while True:
@@ -69,7 +86,7 @@ def tts_worker():
                     filename = f"audio_files/{timestamp}.wav"
                     try:
                         tts.tts_to_file(
-                            text=sentence,  # Ensure each chunk ends with a period
+                            text=sentence,
                             speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\colin.wav",
                             file_path=filename,
                             speed=0.9,
@@ -79,12 +96,13 @@ def tts_worker():
                             language="en"
                         )
                         print(f"Generated TTS file: {filename}")
-                        asyncio.run(manager.send_audio_info(websocket, os.path.basename(filename)))
+                        asyncio.run(send_audio_data_async(websocket, filename))
                     except Exception as e:
                         print(f"Error generating TTS: {e}")
             audio_queue.task_done()
         except Empty:
             continue
+
 
 # Start TTS worker thread
 thread = Thread(target=tts_worker, daemon=True)
@@ -99,11 +117,15 @@ async def websocket_endpoint(websocket: WebSocket):
             message = await websocket.receive()
             print(f"Message received: {message}")
 
-            if message["type"] == "websocket.receive" and "bytes" in message:
-                audio_data = message["bytes"]
+            if message["type"] == "websocket.receive" and "text" in message:
+                audio_data = message["text"]
                 print("Received audio data")
 
-                text = audio_to_text(audio_data)
+                # Decode Base64 audio data
+                decoded_audio = base64.b64decode(audio_data)
+
+                # Convert decoded audio to text
+                text = audio_to_text(decoded_audio)
                 print(f"Converted audio to text: {text}")
 
                 response = await llm.query_llm(text, session_id="0001")
@@ -111,7 +133,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"Response from LLM: {response_string}")
 
                 await manager.send_message(websocket, response_string)
-                audio_queue.put((websocket, response_string))  # Enqueue response for TTS
+                audio_queue.put((websocket, response_string))
             elif message["type"] == "websocket.receive" and "text" in message:
                 text = message["text"]
                 print(f"Received text: {text}")
@@ -122,13 +144,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"Response from LLM: {response_string}")
 
                 await manager.send_message(websocket, response_string)
-                audio_queue.put((websocket, response_string))  # Enqueue response for TTS
+                audio_queue.put((websocket, response_string))
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
         logger.error(f"Error handling websocket: {e}")
-
-@app.get("/audio/{audio_file_name}")
+        
+        
+        
+@app.get("/{audio_file_name}")
 async def get_audio(audio_file_name: str):
     print(f"Received request for audio file: {audio_file_name}")
     file_path = f"audio_files/{audio_file_name}"
@@ -136,6 +160,8 @@ async def get_audio(audio_file_name: str):
         raise HTTPException(status_code=404, detail="Audio file not found")
     print(f"Serving audio file from: {file_path}")
     return FileResponse(file_path, media_type="audio/wav")
+
+
 
 
 if __name__ == "__main__":
