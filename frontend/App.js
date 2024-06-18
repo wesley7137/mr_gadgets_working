@@ -15,9 +15,9 @@ import { Audio, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system";
 
 const SERVER_URL =
-  "wss://fab2-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app/ws";
-const AUDIO_URL =
-  "https://fab2-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app/audio";
+  "wss://0c2c-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app/ws";
+const URL =
+  "https://0c2c-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app";
 
 const App = () => {
   const [connection, setConnection] = useState(null);
@@ -28,6 +28,8 @@ const App = () => {
   const isPlaying = useRef(false);
   const [audioQueue, setAudioQueue] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
+  const URL =
+    "https://0c2c-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app";
 
   useEffect(() => {
     const requestPermissions = async () => {
@@ -41,8 +43,7 @@ const App = () => {
       try {
         await Audio.setAudioModeAsync({
           playsInSilentModeIOS: true,
-          staysActiveInBackground: true,
-          interruptionModeIOS: InterruptionModeIOS.DuckOthers
+          staysActiveInBackground: true
         });
         console.log("Audio mode set");
       } catch (error) {
@@ -62,36 +63,57 @@ const App = () => {
 
   const startConnection = async () => {
     const socket = new WebSocket(SERVER_URL);
+    console.log("Socket created");
+    socket.binaryType = "blob";
+    console.log("Socket binaryType set to blob");
+
     setConnection(socket);
+    console.log("Connection set");
 
     socket.onopen = () => {
       console.log("Connected to server");
       setStatus("Connected to server");
+      console.log("Status set to 'Connected to server'");
       setIsConnected(true);
+      console.log("isConnected set to true");
     };
 
     socket.onmessage = async (event) => {
+      console.log("Message received");
       if (typeof event.data === "string") {
+        console.log("Event.data is string", event.data);
         const message = JSON.parse(event.data);
-        setResponseText(message.message); // Update based on actual message format
-        if (message.status === 200 && message.filename) {
-          console.log("TTS Generation Success..");
-          setStatus("Audio received");
-          setAudioQueue((prevQueue) => [...prevQueue, message.filename]);
+        console.log("Message parsed", message);
+        setResponseText(message.message);
+        console.log("Response text set", message.message);
+      } else if (event.data instanceof Blob) {
+        console.log("Data is Blob", event.data);
+        const audioBlob = event.data;
+        console.log("Audio blob created", audioBlob);
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const audioUrl = reader.result;
+          console.log("Audio URL created", audioUrl);
+          setAudioQueue((prevQueue) => [...prevQueue, audioUrl]);
+          console.log("Audio added to queue", audioUrl);
           if (!isPlaying.current) {
+            console.log("Not currently playing");
             playNextInQueue();
+            console.log("Playing next in queue");
           }
-        }
+        };
+        reader.readAsDataURL(audioBlob);
       }
     };
 
     socket.onclose = () => {
       console.log("Disconnected from server");
       setStatus("Disconnected from server");
+      console.log("Status set to 'Disconnected from server'");
       setIsConnected(false);
+      console.log("isConnected set to false");
     };
   };
-
   const startRecording = async () => {
     try {
       console.log("Requesting permissions..");
@@ -102,8 +124,7 @@ const App = () => {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers
+        staysActiveInBackground: true
       });
 
       const { recording } = await Audio.Recording.createAsync(
@@ -122,9 +143,8 @@ const App = () => {
     console.log("Stopping recording..");
     setStatus("Processing");
     await recording.stopAndUnloadAsync();
-    setRecording(null);
-
     const uri = recording.getURI();
+    setRecording(null);
     console.log("Recording stopped and stored at", uri);
     sendAudio(uri);
   };
@@ -137,62 +157,12 @@ const App = () => {
         encoding: FileSystem.EncodingType.Base64
       });
 
-      const binaryAudio = Uint8Array.from(atob(audioData), (c) =>
-        c.charCodeAt(0)
-      );
-
-      connection.send(binaryAudio.buffer);
+      connection.send(audioData);
     } catch (error) {
       console.error("Failed to send audio", error);
     }
   };
 
-  // Function to fetch the audio from the endpoint
-  const fetchAudio = async (filename) => {
-    const audioUrl = `${AUDIO_URL}/${filename}`;
-    console.log("Fetching audio from:", audioUrl);
-
-    try {
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: audioUrl },
-        { shouldPlay: false } // Fetch but don't auto-play
-      );
-      return newSound;
-    } catch (error) {
-      console.error("Failed to fetch audio", error);
-      return null;
-    }
-  };
-
-  // Function to play the audio file
-  const playFetchedAudio = async (sound, filename) => {
-    if (!sound) return;
-    console.log("Playing audio:", filename);
-
-    sound.setOnPlaybackStatusUpdate(async (status) => {
-      if (status.didJustFinish) {
-        console.log("Finished playing:", filename);
-        await sound.unloadAsync(); // Unload audio resources
-        isPlaying.current = false;
-        setStatus("Idle");
-
-        // Play the next audio file if available
-        playNextInQueu();
-      }
-    });
-
-    try {
-      await sound.playAsync();
-      setStatus("Playing audio");
-      setLoading(false);
-    } catch (error) {
-      console.error("Failed to play sound", error);
-      isPlaying.current = false;
-      setStatus("Idle");
-    }
-  };
-
-  // Function to handle the queue and play the next audio file
   const playNextInQueue = async () => {
     setAudioQueue((prevQueue) => {
       if (prevQueue.length === 0) {
@@ -200,9 +170,19 @@ const App = () => {
         return prevQueue;
       }
 
-      const nextFilename = prevQueue[0];
-      fetchAudio(nextFilename)
-        .then((sound) => playFetchedAudio(sound, nextFilename))
+      const audioUrl = prevQueue[0];
+      Audio.Sound.createAsync({ uri: audioUrl }, { shouldPlay: true })
+        .then(({ sound }) => {
+          sound.setOnPlaybackStatusUpdate(async (status) => {
+            if (status.didJustFinish) {
+              console.log("Finished playing");
+              await sound.unloadAsync();
+              isPlaying.current = false;
+              setStatus("Idle");
+              playNextInQueue();
+            }
+          });
+        })
         .catch((error) => console.error("Error in playNextInQueue:", error));
 
       return prevQueue.slice(1);
@@ -278,6 +258,7 @@ const styles = StyleSheet.create({
   },
   responseContainer: {
     marginTop: 100,
+    color: "#ffffff",
     padding: 10,
     backgroundColor: "#5d5d5db8",
     borderRadius: 5,
@@ -286,27 +267,6 @@ const styles = StyleSheet.create({
   },
   response: {
     fontSize: 18
-  },
-  codeContainer: {
-    marginTop: 20,
-    padding: 10,
-    color: "#04ff00",
-    backgroundColor: "#000000",
-    borderRadius: 5,
-    width: "90%",
-    maxHeight: "20%",
-    fontSize: 14,
-    fontFamily: "courier-mono"
-  },
-  codeTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-    marginBottom: 10,
-    color: "#ffffff"
-  },
-  code: {
-    fontFamily: "roboto-mono",
-    fontSize: 16
   }
 });
 
