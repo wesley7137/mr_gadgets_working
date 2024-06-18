@@ -4,15 +4,14 @@ import uvicorn
 import logging
 from utils.stt.stt import audio_to_text
 from fastapi.responses import FileResponse
-from queue import Queue
+from queue import Queue, Empty
 from threading import Thread
 import os
 from datetime import datetime
 from TTS.api import TTS
 import torch
-import tempfile
 import requests
-
+import llm
 app = FastAPI()
 
 logging.basicConfig(level=logging.INFO)
@@ -54,31 +53,42 @@ manager = WebSocketManager()
 # Initialize the audio queue
 audio_queue = Queue()
 
-async def generate_tts_and_enqueue(websocket: WebSocket, response_text: str):
-    sentences = response_text.split('. ')
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if sentence:
-            timestamp = datetime.now().strftime("%m-%d-%Y-%I_%M%p-%f")
-            filename = f"audio_files/{timestamp}.wav"
-            try:
-                tts.tts_to_file(
-                    text=sentence + '.',  # Ensure each chunk ends with a period
-                    speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\colin.wav",
-                    file_path=filename,
-                    speed=0.9,
-                    temperature=0.3,
-                    top_k=75,
-                    top_p=0.9,
-                    split_sentences=True,
-                    language="en"
-                )
-                print(f"Generated TTS file: {filename}")
-                audio_queue.put(filename)
-                await manager.send_audio_info(websocket, os.path.basename(filename))
-                return 200, (f"Generated TTS file: {filename}")
-            except Exception as e:
-                print(f"Error generating TTS: {e}")
+def tts_worker():
+    while True:
+        try:
+            item = audio_queue.get(timeout=1)  # Get item from queue
+            if item is None:
+                continue
+
+            websocket, response_text = item
+            sentences = response_text.split('. ')
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if sentence:
+                    timestamp = datetime.now().strftime("%m-%d-%Y-%I_%M%p-%f")
+                    filename = f"audio_files/{timestamp}.wav"
+                    try:
+                        tts.tts_to_file(
+                            text=sentence,  # Ensure each chunk ends with a period
+                            speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\colin.wav",
+                            file_path=filename,
+                            speed=0.9,
+                            temperature=0.3,
+                            top_k=75,
+                            top_p=0.9,
+                            language="en"
+                        )
+                        print(f"Generated TTS file: {filename}")
+                        asyncio.run(manager.send_audio_info(websocket, os.path.basename(filename)))
+                    except Exception as e:
+                        print(f"Error generating TTS: {e}")
+            audio_queue.task_done()
+        except Empty:
+            continue
+
+# Start TTS worker thread
+thread = Thread(target=tts_worker, daemon=True)
+thread.start()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -88,29 +98,31 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive()
             print(f"Message received: {message}")
-        
+
             if message["type"] == "websocket.receive" and "bytes" in message:
                 audio_data = message["bytes"]
                 print("Received audio data")
-            
+
                 text = audio_to_text(audio_data)
                 print(f"Converted audio to text: {text}")
-            
-                response_text = await query_llm(text)
-                print(f"Response from LLM: {response_text}")
-            
-                await manager.send_message(websocket, response_text)
-                await generate_tts_and_enqueue(websocket, response_text)
-        
+
+                response = await llm.query_llm(text, session_id="0001")
+                response_string = response.content
+                print(f"Response from LLM: {response_string}")
+
+                await manager.send_message(websocket, response_string)
+                audio_queue.put((websocket, response_string))  # Enqueue response for TTS
             elif message["type"] == "websocket.receive" and "text" in message:
                 text = message["text"]
                 print(f"Received text: {text}")
-            
-                response_text = await query_llm(text)
-                print(f"Response from LLM: {response_text}")
-            
-                await manager.send_message(websocket, response_text)
-                await generate_tts_and_enqueue(websocket, response_text)
+
+                response = await llm.query_llm(text, session_id="0001")
+                response_string = response.content
+
+                print(f"Response from LLM: {response_string}")
+
+                await manager.send_message(websocket, response_string)
+                audio_queue.put((websocket, response_string))  # Enqueue response for TTS
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
@@ -125,29 +137,6 @@ async def get_audio(audio_file_name: str):
     print(f"Serving audio file from: {file_path}")
     return FileResponse(file_path, media_type="audio/wav")
 
-async def query_llm(text: str):
-    try:
-        from openai import OpenAI
-        client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
-
-        completion = client.chat.completions.create(
-            model="model-identifier",
-            messages=[
-                {"role": "system", "content": "You are an AI personal assistant that is connected to the user via their mobile device."},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.3,
-        )
-
-        response = completion.choices[0].message.content
-        return response
-    
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP error occurred: {e}")
-        return "An error occurred while querying the language model."
-    except Exception as e:
-        logger.error(f"General error occurred: {e}")
-        return "A general error occurred while querying the language model."
 
 if __name__ == "__main__":
     logger.info("Starting WebSocket server...")
