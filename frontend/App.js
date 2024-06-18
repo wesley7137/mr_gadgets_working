@@ -23,12 +23,10 @@ const App = () => {
   const [connection, setConnection] = useState(null);
   const [recording, setRecording] = useState(null);
   const [responseText, setResponseText] = useState("");
-  const [codeSnippet, setCodeSnippet] = useState("");
   const [loading, setLoading] = useState(false);
-  const [audioQueue, setAudioQueue] = useState([]);
   const [status, setStatus] = useState("Idle");
   const isPlaying = useRef(false);
-  const audioStore = useRef([]); // In-memory store for audio files
+  const [audioQueue, setAudioQueue] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
@@ -62,29 +60,9 @@ const App = () => {
     };
   }, [recording]);
 
-  useEffect(() => {
-    if (!isPlaying.current && audioStore.current.length > 0) {
-      playNextInQueue();
-    }
-  }, [audioQueue]);
-
   const startConnection = async () => {
     const socket = new WebSocket(SERVER_URL);
-
-    socket.onmessage = async (event) => {
-      if (typeof event.data === "string") {
-        const message = JSON.parse(event.data);
-        setResponseText(message.text);
-        setCodeSnippet(message.text);
-        if (message.status === 200) {
-          // Expecting status as an integer
-          console.log("TTS Generation Success..");
-          setStatus("Audio received");
-          audioStore.current.push(message.filename); // Store filename in the in-memory queue
-          setAudioQueue([...audioStore.current]);
-        }
-      }
-    };
+    setConnection(socket);
 
     socket.onopen = () => {
       console.log("Connected to server");
@@ -92,13 +70,26 @@ const App = () => {
       setIsConnected(true);
     };
 
+    socket.onmessage = async (event) => {
+      if (typeof event.data === "string") {
+        const message = JSON.parse(event.data);
+        setResponseText(message.message); // Update based on actual message format
+        if (message.status === 200 && message.filename) {
+          console.log("TTS Generation Success..");
+          setStatus("Audio received");
+          setAudioQueue((prevQueue) => [...prevQueue, message.filename]);
+          if (!isPlaying.current) {
+            playNextInQueue();
+          }
+        }
+      }
+    };
+
     socket.onclose = () => {
       console.log("Disconnected from server");
       setStatus("Disconnected from server");
       setIsConnected(false);
     };
-
-    setConnection({ socket });
   };
 
   const startRecording = async () => {
@@ -139,7 +130,7 @@ const App = () => {
   };
 
   const sendAudio = async (uri) => {
-    if (!connection || !connection.socket) return;
+    if (!connection) return;
 
     try {
       const audioData = await FileSystem.readAsStringAsync(uri, {
@@ -150,49 +141,72 @@ const App = () => {
         c.charCodeAt(0)
       );
 
-      connection.socket.send(binaryAudio.buffer);
+      connection.send(binaryAudio.buffer);
     } catch (error) {
       console.error("Failed to send audio", error);
     }
   };
 
-  const playNextInQueue = async () => {
-    if (audioStore.current.length === 0 || isPlaying.current) return; // Prevent double play
-    isPlaying.current = true;
+  // Function to fetch the audio from the endpoint
+  const fetchAudio = async (filename) => {
+    const audioUrl = `${AUDIO_URL}/${filename}`;
+    console.log("Fetching audio from:", audioUrl);
 
-    const nextAudio = audioStore.current.shift(); // Retrieve the next audio filename
-    setAudioQueue([...audioStore.current]); // Update state to reflect the removed file
-    console.log("Retrieving audio from server:", nextAudio);
-    setStatus("Playing audio");
-    setLoading(true);
     try {
-      const audioUrl = `${AUDIO_URL}/${nextAudio}`;
-
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: audioUrl },
-        { shouldPlay: true }
+        { shouldPlay: false } // Fetch but don't auto-play
       );
-
-      newSound.setOnPlaybackStatusUpdate(async (status) => {
-        if (status.didJustFinish) {
-          console.log("Finished playing:", nextAudio);
-          await newSound.unloadAsync();
-          isPlaying.current = false;
-          if (audioStore.current.length > 0) {
-            playNextInQueue(); // Play next audio if available
-          } else {
-            setStatus("Idle");
-          }
-        }
-      });
-
-      await newSound.playAsync();
+      return newSound;
     } catch (error) {
-      console.log("Failed to play sound", error);
-      isPlaying.current = false;
-    } finally {
-      setLoading(false);
+      console.error("Failed to fetch audio", error);
+      return null;
     }
+  };
+
+  // Function to play the audio file
+  const playFetchedAudio = async (sound, filename) => {
+    if (!sound) return;
+    console.log("Playing audio:", filename);
+
+    sound.setOnPlaybackStatusUpdate(async (status) => {
+      if (status.didJustFinish) {
+        console.log("Finished playing:", filename);
+        await sound.unloadAsync(); // Unload audio resources
+        isPlaying.current = false;
+        setStatus("Idle");
+
+        // Play the next audio file if available
+        playNextInQueu();
+      }
+    });
+
+    try {
+      await sound.playAsync();
+      setStatus("Playing audio");
+      setLoading(false);
+    } catch (error) {
+      console.error("Failed to play sound", error);
+      isPlaying.current = false;
+      setStatus("Idle");
+    }
+  };
+
+  // Function to handle the queue and play the next audio file
+  const playNextInQueue = async () => {
+    setAudioQueue((prevQueue) => {
+      if (prevQueue.length === 0) {
+        isPlaying.current = false;
+        return prevQueue;
+      }
+
+      const nextFilename = prevQueue[0];
+      fetchAudio(nextFilename)
+        .then((sound) => playFetchedAudio(sound, nextFilename))
+        .catch((error) => console.error("Error in playNextInQueue:", error));
+
+      return prevQueue.slice(1);
+    });
   };
 
   const toggleRecording = () => {
@@ -238,6 +252,7 @@ const App = () => {
     </ImageBackground>
   );
 };
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -253,7 +268,7 @@ const styles = StyleSheet.create({
     color: "#ffffff"
   },
   status: {
-    fontSize: 30,
+    fontSize: 25,
     borderRadius: 20,
     fontWeight: "bold",
     color: "#04ff00",
