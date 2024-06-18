@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -11,13 +11,13 @@ import {
   TouchableOpacity
 } from "react-native";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
-import * as Permissions from "expo-permissions";
 import { Audio, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system";
 
-//const SERVER_URL = "ws://192.168.1.224:8015/ws";
-//const AUDIO_URL = "http://192.168.1.224:8015/audio";
-
+const SERVER_URL =
+  "wss://fab2-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app/ws";
+const AUDIO_URL =
+  "https://fab2-2600-1700-290-8d90-58b8-94f1-605e-2c4b.ngrok-free.app/audio";
 
 const App = () => {
   const [connection, setConnection] = useState(null);
@@ -25,14 +25,15 @@ const App = () => {
   const [responseText, setResponseText] = useState("");
   const [codeSnippet, setCodeSnippet] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sound, setSound] = useState();
+  const [audioQueue, setAudioQueue] = useState([]);
   const [status, setStatus] = useState("Idle");
+  const isPlaying = useRef(false);
+  const audioStore = useRef([]); // In-memory store for audio files
+  const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
     const requestPermissions = async () => {
-      const { status } = await Permissions.askAsync(
-        Permissions.AUDIO_RECORDING
-      );
+      const { status } = await Audio.requestPermissionsAsync();
       if (status !== "granted") {
         Alert.alert("Permissions not granted");
       }
@@ -58,19 +59,17 @@ const App = () => {
       if (recording) {
         recording.stopAndUnloadAsync();
       }
-      if (sound) {
-        sound.unloadAsync();
-      }
     };
-  }, []);
+  }, [recording]);
+
+  useEffect(() => {
+    if (!isPlaying.current && audioStore.current.length > 0) {
+      playNextInQueue();
+    }
+  }, [audioQueue]);
 
   const startConnection = async () => {
     const socket = new WebSocket(SERVER_URL);
-
-    socket.onopen = () => {
-      console.log("Connected to server");
-      setStatus("Connected to server");
-    };
 
     socket.onmessage = async (event) => {
       if (typeof event.data === "string") {
@@ -78,16 +77,25 @@ const App = () => {
         setResponseText(message.text);
         setCodeSnippet(message.text);
         if (message.status === 200) {
+          // Expecting status as an integer
           console.log("TTS Generation Success..");
           setStatus("Audio received");
-          await retrieveAndPlayAudio(message.filename);
+          audioStore.current.push(message.filename); // Store filename in the in-memory queue
+          setAudioQueue([...audioStore.current]);
         }
       }
+    };
+
+    socket.onopen = () => {
+      console.log("Connected to server");
+      setStatus("Connected to server");
+      setIsConnected(true);
     };
 
     socket.onclose = () => {
       console.log("Disconnected from server");
       setStatus("Disconnected from server");
+      setIsConnected(false);
     };
 
     setConnection({ socket });
@@ -118,10 +126,12 @@ const App = () => {
   };
 
   const stopRecording = async () => {
+    if (!recording) return;
+
     console.log("Stopping recording..");
     setStatus("Processing");
-    setRecording(undefined);
     await recording.stopAndUnloadAsync();
+    setRecording(null);
 
     const uri = recording.getURI();
     console.log("Recording stopped and stored at", uri);
@@ -146,53 +156,77 @@ const App = () => {
     }
   };
 
-  const retrieveAndPlayAudio = async (filename) => {
-    console.log("Retrieving audio from server");
+  const playNextInQueue = async () => {
+    if (audioStore.current.length === 0 || isPlaying.current) return; // Prevent double play
+    isPlaying.current = true;
+
+    const nextAudio = audioStore.current.shift(); // Retrieve the next audio filename
+    setAudioQueue([...audioStore.current]); // Update state to reflect the removed file
+    console.log("Retrieving audio from server:", nextAudio);
     setStatus("Playing audio");
     setLoading(true);
     try {
-      const audioUrl = `${AUDIO_URL}/${filename}`;
+      const audioUrl = `${AUDIO_URL}/${nextAudio}`;
 
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: audioUrl },
         { shouldPlay: true }
       );
-      setSound(newSound);
+
+      newSound.setOnPlaybackStatusUpdate(async (status) => {
+        if (status.didJustFinish) {
+          console.log("Finished playing:", nextAudio);
+          await newSound.unloadAsync();
+          isPlaying.current = false;
+          if (audioStore.current.length > 0) {
+            playNextInQueue(); // Play next audio if available
+          } else {
+            setStatus("Idle");
+          }
+        }
+      });
+
       await newSound.playAsync();
     } catch (error) {
       console.log("Failed to play sound", error);
+      isPlaying.current = false;
     } finally {
       setLoading(false);
-      setStatus("Idle");
+    }
+  };
+
+  const toggleRecording = () => {
+    if (recording) {
+      stopRecording();
+    } else {
+      startRecording();
     }
   };
 
   return (
     <ImageBackground source={require("./assets/bg1.png")} style={{ flex: 1 }}>
       <SafeAreaView style={styles.container}>
-        <Text style={styles.title}>Mr Gadgets</Text>
+        <Text style={styles.title}>STATUS</Text>
         <Text style={styles.status}>{status}</Text>
         <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
           <TouchableOpacity onPress={startConnection}>
             <FontAwesome
               name="connectdevelop"
-              size={65}
-              color={connection ? "green" : "white"}
+              size={80}
+              color={isConnected ? "green" : "white"}
               style={{
-                marginTop: 30,
+                marginTop: 60,
                 marginBottom: 30,
-                marginRight: 50
+                marginRight: 60
               }}
             />
           </TouchableOpacity>
-          <TouchableOpacity
-            onPress={recording ? stopRecording : startRecording}
-          >
+          <TouchableOpacity onPress={toggleRecording}>
             <FontAwesome
               name="microphone"
-              size={65}
+              size={80}
               color={recording ? "red" : "white"}
-              style={{ marginTop: 30, marginBottom: 30 }}
+              style={{ marginTop: 60, marginBottom: 30 }}
             />
           </TouchableOpacity>
         </View>
@@ -200,41 +234,40 @@ const App = () => {
           <Text style={styles.response}>{responseText}</Text>
           {loading && <ActivityIndicator size="large" color="#0000ff" />}
         </ScrollView>
-        <ScrollView style={styles.codeContainer}>
-          <Text style={styles.codeTitle}>Code Snippet</Text>
-          <Text style={styles.code}>{codeSnippet}</Text>
-        </ScrollView>
       </SafeAreaView>
     </ImageBackground>
   );
 };
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     justifyContent: "center",
-    alignItems: "center"
+    alignItems: "center",
+    backgroundColor: "#00000088"
   },
   title: {
-    fontWeight: "bold",
     fontFamily: "roboto-mono",
-    marginTop: 20,
-    fontSize: 24,
-    marginBottom: 20,
+    marginTop: 30,
+    fontSize: 45,
+    marginBottom: 30,
     color: "#ffffff"
   },
   status: {
-    fontSize: 18,
-    color: "#ffffff",
-    marginBottom: 10
+    fontSize: 30,
+    borderRadius: 20,
+    fontWeight: "bold",
+    color: "#04ff00",
+    marginBottom: 30,
+    padding: 20,
+    backgroundColor: "#000000be"
   },
   responseContainer: {
-    marginTop: 20,
+    marginTop: 100,
     padding: 10,
-    backgroundColor: "#5d5d5d",
+    backgroundColor: "#5d5d5db8",
     borderRadius: 5,
-    width: "90%",
-    height: "30%"
+    width: "80%",
+    maxHeight: "30%"
   },
   response: {
     fontSize: 18
@@ -246,7 +279,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#000000",
     borderRadius: 5,
     width: "90%",
-    height: "30%",
+    maxHeight: "20%",
     fontSize: 14,
     fontFamily: "courier-mono"
   },
