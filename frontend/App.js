@@ -6,11 +6,13 @@ import {
   View,
   ImageBackground,
   ScrollView,
-  ActivityIndicator
+  ActivityIndicator,
+  TouchableOpacity
 } from "react-native";
-import { Audio } from "expo-av";
+import { Audio, InterruptionModeIOS } from "expo-av";
 import StatusHeader from "./StatusHeader";
 import RecordingControl from "./RecordingControl";
+import FontAwesome from "@expo/vector-icons/FontAwesome";
 
 const WEBSOCKET_URL = "wss://5d0a-104-12-202-232.ngrok-free.app/ws";
 
@@ -19,10 +21,14 @@ const App = () => {
   const [recording, setRecording] = useState(null);
   const [status, setStatus] = useState("Idle");
   const [responseText, setResponseText] = useState("");
+  const [retryTimeout, setRetryTimeout] = useState(0); // State to track retry time
   const websocket = useRef(null);
   const audioPlayer = useRef(new Audio.Sound());
   const audioQueue = useRef([]);
   const isPlaying = useRef(false);
+  const retryIntervalRef = useRef(null);
+  const timeoutDuration = 60000; // 1 minute
+  const retryInterval = 6000; // 6 seconds
 
   useEffect(() => {
     connectWebSocket();
@@ -30,26 +36,49 @@ const App = () => {
       if (websocket.current) {
         websocket.current.close();
       }
+      if (retryIntervalRef.current) {
+        clearInterval(retryIntervalRef.current);
+      }
     };
   }, []);
 
   const connectWebSocket = () => {
+    if (retryTimeout >= timeoutDuration) {
+      console.log("WebSocket connection timed out after 1 minute");
+      clearInterval(retryIntervalRef.current);
+      return;
+    }
+
     console.log("Connecting to WebSocket...");
     websocket.current = new WebSocket(WEBSOCKET_URL);
 
     websocket.current.onopen = () => {
       console.log("WebSocket connected");
       setIsConnected(true);
+      setRetryTimeout(0);
+      clearInterval(retryIntervalRef.current);
     };
 
     websocket.current.onclose = () => {
       console.log("WebSocket closed");
       setIsConnected(false);
+      if (retryTimeout < timeoutDuration) {
+        setRetryTimeout((prev) => prev + retryInterval);
+        retryIntervalRef.current = setInterval(() => {
+          connectWebSocket();
+        }, retryInterval);
+      }
     };
 
     websocket.current.onerror = (error) => {
       console.error("WebSocket error:", error);
       setIsConnected(false);
+      if (retryTimeout < timeoutDuration) {
+        setRetryTimeout((prev) => prev + retryInterval);
+        retryIntervalRef.current = setInterval(() => {
+          connectWebSocket();
+        }, retryInterval);
+      }
     };
 
     websocket.current.onmessage = (event) => {
@@ -83,6 +112,17 @@ const App = () => {
     try {
       await audioPlayer.current.unloadAsync();
       await audioPlayer.current.loadAsync({ uri: audioUri });
+
+      // Set audio mode to play through the speaker
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false, // Ensure playback through the speaker on iOS
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        staysActiveInBackground: true,
+        playThroughEarpieceAndroid: false // For Android
+      });
+
       await audioPlayer.current.playAsync();
       audioPlayer.current.setOnPlaybackStatusUpdate((playbackStatus) => {
         if (playbackStatus.didJustFinish) {
@@ -106,7 +146,7 @@ const App = () => {
       }
 
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
+        allowsRecordingIOS: true, // Enable recording
         playsInSilentModeIOS: true
       });
 
@@ -130,6 +170,13 @@ const App = () => {
     const uri = recording.getURI();
     setRecording(null);
     console.log("Recording stopped. URI:", uri);
+
+    // Disable recording to allow speaker playback
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false, // Disable recording after stopping
+      playsInSilentModeIOS: true
+    });
+
     sendAudioToServer(uri);
   };
 
@@ -161,6 +208,34 @@ const App = () => {
     }
   };
 
+  const refreshConnection = () => {
+    console.log("Refreshing WebSocket connection...");
+    // Stop current recording
+    if (recording) {
+      stopRecording();
+    }
+
+    // Stop audio playback
+    if (audioPlayer.current) {
+      audioPlayer.current.stopAsync();
+    }
+
+    // Reset states
+    setStatus("Idle");
+    setResponseText("");
+    audioQueue.current = [];
+    isPlaying.current = false;
+
+    // Close current WebSocket connection
+    if (websocket.current) {
+      websocket.current.close();
+      websocket.current = null;
+    }
+
+    // Reconnect WebSocket
+    connectWebSocket();
+  };
+
   return (
     <ImageBackground source={require("./assets/bg1.png")} style={{ flex: 1 }}>
       <SafeAreaView style={styles.container}>
@@ -170,16 +245,25 @@ const App = () => {
           startConnections={connectWebSocket}
         />
         <Text style={styles.status}>{status}</Text>
-        <RecordingControl
-          toggleRecording={toggleRecording}
-          recording={status === "Recording"}
-        />
+
         <ScrollView style={styles.responseContainer}>
           <Text style={styles.response}>{responseText}</Text>
           {status === "Processing" && (
             <ActivityIndicator size="large" color="#0000ff" />
           )}
         </ScrollView>
+        <TouchableOpacity
+          style={styles.refreshButton}
+          onPress={refreshConnection}
+        >
+          <FontAwesome name="refresh" size={24} color="white" />
+          <Text style={styles.refreshButtonText}>Refresh</Text>
+        </TouchableOpacity>
+
+        <RecordingControl
+          toggleRecording={toggleRecording}
+          recording={status === "Recording"}
+        />
       </SafeAreaView>
     </ImageBackground>
   );
@@ -200,16 +284,35 @@ const styles = StyleSheet.create({
     padding: 20,
     backgroundColor: "#000000be"
   },
+  refreshButton: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    marginBottom: 20,
+    padding: 10,
+    backgroundColor: "#007bff",
+    borderRadius: 10,
+    marginTop: 40
+  },
+  refreshButtonText: {
+    marginLeft: 10,
+    color: "#ffffff",
+    fontSize: 16
+  },
   responseContainer: {
     padding: 10,
+    borderRadius: 10,
+
     backgroundColor: "#5d5d5db8",
     borderRadius: 5,
     width: "80%",
-    maxHeight: "30%"
+    maxHeight: "60%"
   },
   response: {
     color: "#ffffff",
-    fontSize: 16
+    fontSize: 16,
+    textAlign: "center",
+    padding: 10
   }
 });
 
