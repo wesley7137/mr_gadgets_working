@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -6,103 +6,153 @@ import {
   View,
   ImageBackground,
   ScrollView,
-  ActivityIndicator,
-  TouchableOpacity
+  ActivityIndicator
 } from "react-native";
-import { Audio, InterruptionModeIOS } from "expo-av";
-import FontAwesome from "@expo/vector-icons/FontAwesome";
+import { Audio } from "expo-av";
 import StatusHeader from "./StatusHeader";
 import RecordingControl from "./RecordingControl";
-import * as Speech from "expo-speech";
 
-const API_URL =
-  "https://5d0a-104-12-202-232.ngrok-free.app/api/chat_completions"; // Replace with your backend URL
+const WEBSOCKET_URL = "wss://5d0a-104-12-202-232.ngrok-free.app/ws";
 
 const App = () => {
+  const [isConnected, setIsConnected] = useState(false);
   const [recording, setRecording] = useState(null);
   const [status, setStatus] = useState("Idle");
   const [responseText, setResponseText] = useState("");
-  const soundObject = useRef(new Audio.Sound());
+  const websocket = useRef(null);
+  const audioPlayer = useRef(new Audio.Sound());
+  const audioQueue = useRef([]);
+  const isPlaying = useRef(false);
 
-  // Function to start recording
-  const startRecording = async () => {
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (websocket.current) {
+        websocket.current.close();
+      }
+    };
+  }, []);
+
+  const connectWebSocket = () => {
+    console.log("Connecting to WebSocket...");
+    websocket.current = new WebSocket(WEBSOCKET_URL);
+
+    websocket.current.onopen = () => {
+      console.log("WebSocket connected");
+      setIsConnected(true);
+    };
+
+    websocket.current.onclose = () => {
+      console.log("WebSocket closed");
+      setIsConnected(false);
+    };
+
+    websocket.current.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      setIsConnected(false);
+    };
+
+    websocket.current.onmessage = (event) => {
+      console.log("WebSocket message received:", event.data);
+      const data = JSON.parse(event.data);
+      if (data.type === "audio") {
+        console.log("Received audio data");
+        audioQueue.current.push(data.audio);
+        if (!isPlaying.current) {
+          playNextAudio();
+        }
+      } else if (data.type === "text") {
+        console.log("Received text data:", data.text);
+        setResponseText((prevText) => prevText + data.text);
+      }
+    };
+  };
+
+  const playNextAudio = async () => {
+    if (audioQueue.current.length === 0) {
+      isPlaying.current = false;
+      console.log("No more audio in queue");
+      return;
+    }
+
+    isPlaying.current = true;
+    const audioData = audioQueue.current.shift();
+    const audioUri = `data:audio/mp3;base64,${audioData}`;
+    console.log("Playing audio from queue");
+
     try {
-      console.log("Requesting permissions for audio recording...");
+      await audioPlayer.current.unloadAsync();
+      await audioPlayer.current.loadAsync({ uri: audioUri });
+      await audioPlayer.current.playAsync();
+      audioPlayer.current.setOnPlaybackStatusUpdate((playbackStatus) => {
+        if (playbackStatus.didJustFinish) {
+          console.log("Audio playback finished");
+          playNextAudio();
+        }
+      });
+    } catch (error) {
+      console.error("Error playing audio:", error);
+      playNextAudio();
+    }
+  };
+
+  const startRecording = async () => {
+    console.log("Starting audio recording...");
+    try {
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) {
         console.error("Permission to access audio was denied");
         return;
       }
 
-      setStatus("Recording");
-      console.log("Starting recording...");
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers
+        playsInSilentModeIOS: true
       });
 
       const { recording } = await Audio.Recording.createAsync(
         Audio.RECORDING_OPTIONS_PRESET_HIGH_QUALITY
       );
       setRecording(recording);
-      console.log("Recording started.");
+      setStatus("Recording");
+      console.log("Recording started");
     } catch (err) {
       console.error("Failed to start recording", err);
     }
   };
 
-  // Function to stop recording
   const stopRecording = async () => {
     if (!recording) return;
 
-    console.log("Stopping recording...");
+    console.log("Stopping audio recording...");
     setStatus("Processing");
     await recording.stopAndUnloadAsync();
     const uri = recording.getURI();
     setRecording(null);
     console.log("Recording stopped. URI:", uri);
-    sendAudio(uri);
+    sendAudioToServer(uri);
   };
 
-  const blobToBase64 = (blob) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  };
-
-  // Function to send audio data
-  const sendAudio = async (uri) => {
+  const sendAudioToServer = async (uri) => {
+    console.log("Sending audio to server...");
     try {
-      console.log("Fetching audio data from URI:", uri);
       const response = await fetch(uri);
-      const audioBlob = await response.blob();
-      const base64Audio = await blobToBase64(audioBlob);
-
-      console.log("Sending audio data over HTTP POST");
-      const result = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ audio_bytes: base64Audio.split(",")[1] }) // Remove 'data:audio/wav;base64,' prefix
-      });
-
-      const data = await result.json();
-      console.log("Received response from server:", data.response);
-      setResponseText(data.response);
-      setStatus("Idle");
+      const blob = await response.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64Audio = reader.result.split(",")[1];
+        console.log("Audio converted to base64");
+        websocket.current.send(
+          JSON.stringify({ type: "audio", audio: base64Audio })
+        );
+        console.log("Audio sent to server");
+      };
+      reader.readAsDataURL(blob);
     } catch (error) {
       console.error("Failed to send audio", error);
-      setStatus("Idle");
     }
   };
 
-  // Function to toggle recording
   const toggleRecording = () => {
     if (status === "Recording") {
       stopRecording();
@@ -114,15 +164,18 @@ const App = () => {
   return (
     <ImageBackground source={require("./assets/bg1.png")} style={{ flex: 1 }}>
       <SafeAreaView style={styles.container}>
-        <StatusHeader status={status} isConnected={true} />
+        <StatusHeader
+          status={status}
+          isConnected={isConnected}
+          startConnections={connectWebSocket}
+        />
         <Text style={styles.status}>{status}</Text>
         <RecordingControl
           toggleRecording={toggleRecording}
           recording={status === "Recording"}
         />
         <ScrollView style={styles.responseContainer}>
-          <Text style={styles.response}>Response from server</Text>
-          <Text style={styles.responseText}>{responseText}</Text>
+          <Text style={styles.response}>{responseText}</Text>
           {status === "Processing" && (
             <ActivityIndicator size="large" color="#0000ff" />
           )}
@@ -155,18 +208,8 @@ const styles = StyleSheet.create({
     maxHeight: "30%"
   },
   response: {
-    fontSize: 16,
     color: "#ffffff",
-    textAlign: "center",
-    padding: 10,
-    lineHeight: 20
-  },
-  responseText: {
-    fontSize: 14,
-    color: "#ffffff",
-    textAlign: "center",
-    padding: 10,
-    lineHeight: 20
+    fontSize: 16
   }
 });
 
