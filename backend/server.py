@@ -67,9 +67,9 @@ async def process_audio_queue():
                             text=sentence,
                             speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\colin.wav",
                             file_path=bytes_buffer,
-                            speed=0.9,
-                            temperature=0.3,
-                            top_k=75,
+                            speed=1.3,
+                            temperature=0.9,
+                            top_k=95,
                             top_p=0.9,
                             language="en"
                         )
@@ -114,6 +114,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # Query LLM with the text
                 response = await llm.query_llm(text, session_id="0001")
+                print(f"Response from LLM: {response}")
                 response_string = response.content
                 print(f"Response from LLM: {response_string}")
 
