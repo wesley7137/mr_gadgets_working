@@ -1,36 +1,62 @@
 import React, { useEffect, useRef } from "react";
+import { View, Text, StyleSheet } from "react-native";
 import { Audio } from "expo-av";
 
 const AudioPlayback = ({ audioPath, onPlaybackComplete }) => {
-  const playbackObject = useRef(new Audio.Sound());
+  const soundObject = useRef(new Audio.Sound());
 
   useEffect(() => {
-    const loadAndPlayAudio = async () => {
+    const playAudio = async () => {
       try {
-        await playbackObject.current.unloadAsync();
-        await playbackObject.current.loadAsync({ uri: audioPath });
-        await playbackObject.current.playAsync();
-        playbackObject.current.setOnPlaybackStatusUpdate((status) => {
+        // Unload the sound object if it's already loaded
+        if (soundObject.current._loaded) {
+          await soundObject.current.unloadAsync();
+        }
+        
+        console.log(`Loading audio from path: ${audioPath}`);
+        await soundObject.current.loadAsync({ uri: audioPath });
+        console.log(`Playing audio from path: ${audioPath}`);
+        
+        await soundObject.current.playAsync();
+        
+        soundObject.current.setOnPlaybackStatusUpdate(async (status) => {
           if (status.didJustFinish) {
+            console.log("Audio playback finished");
             onPlaybackComplete();
+            // Ensure unloading after playback completes
+            await soundObject.current.unloadAsync();
           }
         });
       } catch (error) {
-        console.error("Error in loading or playing audio:", error);
-        onPlaybackComplete(); // Call on complete in case of error to proceed with the queue
+        console.error("Error playing audio:", error);
       }
     };
 
-    if (audioPath) {
-      loadAndPlayAudio();
-    }
+    playAudio();
 
+    // Cleanup function to unload the sound object when the component unmounts
     return () => {
-      playbackObject.current.unloadAsync();
+      soundObject.current.unloadAsync().catch((error) => {
+        console.error("Error unloading sound object:", error);
+      });
     };
   }, [audioPath, onPlaybackComplete]);
 
-  return null;
+  return (
+    <View style={styles.container}>
+      <Text style={styles.text}>Playing audio...</Text>
+    </View>
+  );
 };
+
+const styles = StyleSheet.create({
+  container: {
+    justifyContent: "center",
+    alignItems: "center"
+  },
+  text: {
+    fontSize: 18
+  }
+});
 
 export default AudioPlayback;
