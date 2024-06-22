@@ -22,3 +22,6 @@ langchain_openai
 sentence-transformers
 langchain-chroma
 langchain-huggingface
+moviepy
+aiofiles
+open_interpreter

@@ -16,7 +16,6 @@ os.environ["OPENAI_API_KEY"] = "OPENAI_API_KEY"
 # Initialize LLM
 OPENAI_API_KEY="lm-studio"
 
-embeddings = HuggingFaceEmbeddings()
 
 # Initialize DeepLake vector store
 
@@ -56,9 +55,3 @@ async def query_llm(text: str, session_id: str):
         print(f"Error occurred: {e}")
         return "An error occurred while querying the language model."
 
-# Example usage
-if __name__ == "__main__":
-    import asyncio
-    response = asyncio.run(query_llm(text="Then how did you remember my dog's name and my age?", session_id="0001"))
-    content = response.content
-    print(content)
