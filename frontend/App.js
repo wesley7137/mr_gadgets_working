@@ -1,84 +1,66 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   SafeAreaView,
   StyleSheet,
   Text,
   View,
   ImageBackground,
-  ScrollView,
   ActivityIndicator,
-  TouchableOpacity
+  ScrollView,
+  TouchableOpacity,
+  Pressable,
+  LogBox
 } from "react-native";
 import { Audio, InterruptionModeIOS } from "expo-av";
+import PagerView from "react-native-pager-view";
+import { FontAwesome } from "@expo/vector-icons";
 import StatusHeader from "./StatusHeader";
 import RecordingControl from "./RecordingControl";
-import FontAwesome from "@expo/vector-icons/FontAwesome";
+import ModelSelector from "./ModelSelector";
+import { useAudioQueue } from "./useAudioQueue";
+import AudioPlayback from "./AudioPlayback";
 
-const WEBSOCKET_URL = "wss://5d0a-104-12-202-232.ngrok-free.app/ws";
+const WEBSOCKET_BASE_URL = "wss://db12-104-12-202-232.ngrok-free.app";
+const WEBSOCKET_ROUTES = {
+  model1: "/ws/interpreter",
+  model2: "/ws/finn"
+};
 
 const App = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [recording, setRecording] = useState(null);
   const [status, setStatus] = useState("Idle");
   const [responseText, setResponseText] = useState("");
-  const [retryTimeout, setRetryTimeout] = useState(0); // State to track retry time
   const websocket = useRef(null);
-  const audioPlayer = useRef(new Audio.Sound());
-  const audioQueue = useRef([]);
-  const isPlaying = useRef(false);
-  const retryIntervalRef = useRef(null);
-  const timeoutDuration = 60000; // 1 minute
-  const retryInterval = 6000; // 6 seconds
+  const [selectedModel, setSelectedModel] = useState("model1");
+  const pagerRef = useRef(null);
 
-  useEffect(() => {
-    connectWebSocket();
-    return () => {
-      if (websocket.current) {
-        websocket.current.close();
-      }
-      if (retryIntervalRef.current) {
-        clearInterval(retryIntervalRef.current);
-      }
-    };
-  }, []);
+  const {
+    audioQueue,
+    currentFilePath,
+    handlePlaybackComplete,
+    addToQueue,
+    clearQueue
+  } = useAudioQueue();
 
-  const connectWebSocket = () => {
-    if (retryTimeout >= timeoutDuration) {
-      console.log("WebSocket connection timed out after 1 minute");
-      clearInterval(retryIntervalRef.current);
-      return;
-    }
-
+  const connectWebSocket = useCallback(() => {
     console.log("Connecting to WebSocket...");
-    websocket.current = new WebSocket(WEBSOCKET_URL);
+    const wsUrl = `${WEBSOCKET_BASE_URL}${WEBSOCKET_ROUTES[selectedModel]}`;
+    websocket.current = new WebSocket(wsUrl);
 
     websocket.current.onopen = () => {
       console.log("WebSocket connected");
       setIsConnected(true);
-      setRetryTimeout(0);
-      clearInterval(retryIntervalRef.current);
     };
 
     websocket.current.onclose = () => {
       console.log("WebSocket closed");
       setIsConnected(false);
-      if (retryTimeout < timeoutDuration) {
-        setRetryTimeout((prev) => prev + retryInterval);
-        retryIntervalRef.current = setInterval(() => {
-          connectWebSocket();
-        }, retryInterval);
-      }
     };
 
     websocket.current.onerror = (error) => {
       console.error("WebSocket error:", error);
       setIsConnected(false);
-      if (retryTimeout < timeoutDuration) {
-        setRetryTimeout((prev) => prev + retryInterval);
-        retryIntervalRef.current = setInterval(() => {
-          connectWebSocket();
-        }, retryInterval);
-      }
     };
 
     websocket.current.onmessage = (event) => {
@@ -86,55 +68,23 @@ const App = () => {
       const data = JSON.parse(event.data);
       if (data.type === "audio") {
         console.log("Received audio data");
-        audioQueue.current.push(data.audio);
-        if (!isPlaying.current) {
-          playNextAudio();
-        }
+        const audioUri = `data:audio/mp3;base64,${data.audio}`;
+        addToQueue(audioUri);
       } else if (data.type === "text") {
         console.log("Received text data:", data.text);
         setResponseText((prevText) => prevText + data.text);
       }
     };
-  };
+  }, [selectedModel, addToQueue]);
 
-  const playNextAudio = async () => {
-    if (audioQueue.current.length === 0) {
-      isPlaying.current = false;
-      console.log("No more audio in queue");
-      return;
-    }
-
-    isPlaying.current = true;
-    const audioData = audioQueue.current.shift();
-    const audioUri = `data:audio/mp3;base64,${audioData}`;
-    console.log("Playing audio from queue");
-
-    try {
-      await audioPlayer.current.unloadAsync();
-      await audioPlayer.current.loadAsync({ uri: audioUri });
-
-      // Set audio mode to play through the speaker
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false, // Ensure playback through the speaker on iOS
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        staysActiveInBackground: true,
-        playThroughEarpieceAndroid: false // For Android
-      });
-
-      await audioPlayer.current.playAsync();
-      audioPlayer.current.setOnPlaybackStatusUpdate((playbackStatus) => {
-        if (playbackStatus.didJustFinish) {
-          console.log("Audio playback finished");
-          playNextAudio();
-        }
-      });
-    } catch (error) {
-      console.error("Error playing audio:", error);
-      playNextAudio();
-    }
-  };
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (websocket.current) {
+        websocket.current.close();
+      }
+    };
+  }, [connectWebSocket]);
 
   const startRecording = async () => {
     console.log("Starting audio recording...");
@@ -146,7 +96,7 @@ const App = () => {
       }
 
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true, // Enable recording
+        allowsRecordingIOS: true,
         playsInSilentModeIOS: true
       });
 
@@ -173,7 +123,7 @@ const App = () => {
 
     // Disable recording to allow speaker playback
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false, // Disable recording after stopping
+      allowsRecordingIOS: false,
       playsInSilentModeIOS: true
     });
 
@@ -208,23 +158,17 @@ const App = () => {
     }
   };
 
-  const refreshConnection = () => {
+  const refreshConnection = useCallback(() => {
     console.log("Refreshing WebSocket connection...");
     // Stop current recording
     if (recording) {
       stopRecording();
     }
 
-    // Stop audio playback
-    if (audioPlayer.current) {
-      audioPlayer.current.stopAsync();
-    }
-
     // Reset states
     setStatus("Idle");
     setResponseText("");
-    audioQueue.current = [];
-    isPlaying.current = false;
+    clearQueue();
 
     // Close current WebSocket connection
     if (websocket.current) {
@@ -234,10 +178,13 @@ const App = () => {
 
     // Reconnect WebSocket
     connectWebSocket();
-  };
+  }, [recording, stopRecording, clearQueue, connectWebSocket]);
 
   return (
-    <ImageBackground source={require("./assets/bg1.png")} style={{ flex: 1 }}>
+    <ImageBackground
+      source={require("./assets/bg1.png")}
+      style={styles.backgroundImage}
+    >
       <SafeAreaView style={styles.container}>
         <StatusHeader
           status={status}
@@ -245,74 +192,140 @@ const App = () => {
           startConnections={connectWebSocket}
         />
         <Text style={styles.status}>{status}</Text>
-
-        <ScrollView style={styles.responseContainer}>
-          <Text style={styles.response}>{responseText}</Text>
-          {status === "Processing" && (
-            <ActivityIndicator size="large" color="#0000ff" />
-          )}
-        </ScrollView>
-        <TouchableOpacity
-          style={styles.refreshButton}
-          onPress={refreshConnection}
-        >
-          <FontAwesome name="refresh" size={24} color="white" />
-          <Text style={styles.refreshButtonText}>Refresh</Text>
-        </TouchableOpacity>
-
-        <RecordingControl
-          toggleRecording={toggleRecording}
-          recording={status === "Recording"}
+        <ModelSelector
+          selectedModel={selectedModel}
+          setSelectedModel={(model) => {
+            setSelectedModel(model);
+            refreshConnection();
+          }}
         />
+        <View style={styles.tabButtons}>
+          <Pressable
+            style={styles.tabButton}
+            onPress={() => pagerRef.current.setPage(0)}
+          >
+            <Text style={styles.tabButtonText}>Response</Text>
+          </Pressable>
+          <Pressable
+            style={styles.tabButton}
+            onPress={() => pagerRef.current.setPage(1)}
+          >
+            <Text style={styles.tabButtonText}>Code</Text>
+          </Pressable>
+        </View>
+        <PagerView style={styles.pagerView} initialPage={0} ref={pagerRef}>
+          <View key="1" style={styles.page}>
+            <ScrollView style={styles.responseContainer}>
+              <Text style={styles.response}>{responseText}</Text>
+              {status === "Processing" && (
+                <ActivityIndicator size="large" color="#0000ff" />
+              )}
+            </ScrollView>
+          </View>
+          <View key="2" style={styles.page}>
+            <View style={styles.scene}>
+              <Text>Second Tab Content</Text>
+            </View>
+          </View>
+        </PagerView>
+        <View style={styles.footer}>
+          <TouchableOpacity
+            style={styles.refreshButton}
+            onPress={refreshConnection}
+          >
+            <FontAwesome name="refresh" size={24} color="white" />
+            <Text style={styles.refreshButtonText}>Refresh</Text>
+          </TouchableOpacity>
+          <RecordingControl
+            toggleRecording={toggleRecording}
+            recording={status === "Recording"}
+          />
+        </View>
+        {currentFilePath && (
+          <AudioPlayback
+            audioPath={currentFilePath}
+            onPlaybackComplete={handlePlaybackComplete}
+          />
+        )}
       </SafeAreaView>
     </ImageBackground>
   );
 };
 
 const styles = StyleSheet.create({
+  backgroundImage: {
+    flex: 1,
+    resizeMode: "cover"
+  },
   container: {
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#00000088"
+    justifyContent: "space-between",
+    padding: 20
   },
   status: {
-    fontSize: 25,
-    borderRadius: 20,
-    color: "#04ff00",
-    marginBottom: 30,
-    padding: 20,
-    backgroundColor: "#000000be"
+    textAlign: "center",
+    fontSize: 18,
+    marginVertical: 10,
+    color: "white"
+  },
+  tabButtons: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    marginBottom: 10
+  },
+  tabButton: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 10,
+    backgroundColor: "#2a9df4",
+    borderRadius: 5,
+    marginHorizontal: 5
+  },
+  tabButtonText: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "bold"
+  },
+  pagerView: {
+    flex: 1,
+    marginVertical: 10
+  },
+  page: {
+    flex: 1,
+    padding: 10,
+    backgroundColor: "rgba(255, 255, 255, 0.9)",
+    borderRadius: 10
+  },
+  responseContainer: {
+    flex: 1
+  },
+  response: {
+    fontSize: 16,
+    color: "#333",
+    marginVertical: 10
+  },
+  footer: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 20
   },
   refreshButton: {
     flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "center",
-    marginBottom: 20,
+    alignItems: "center",
+    backgroundColor: "#28a745",
     padding: 10,
-    backgroundColor: "#007bff",
-    borderRadius: 10,
-    marginTop: 40
+    borderRadius: 5
   },
   refreshButtonText: {
-    marginLeft: 10,
-    color: "#ffffff",
-    fontSize: 16
-  },
-  responseContainer: {
-    padding: 10,
-    borderRadius: 10,
-
-    backgroundColor: "#5d5d5db8",
-    borderRadius: 5,
-    width: "80%",
-    maxHeight: "60%"
-  },
-  response: {
-    color: "#ffffff",
+    color: "white",
     fontSize: 16,
-    textAlign: "center",
-    padding: 10
+    marginLeft: 5
+  },
+  scene: {
+    justifyContent: "center",
+    alignItems: "center",
+    height: "100%"
   }
 });
 

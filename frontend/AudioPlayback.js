@@ -1,4 +1,3 @@
-// components/AudioPlayback.js
 import React, { useEffect, useRef } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { Audio } from "expo-av";
@@ -9,17 +8,23 @@ const AudioPlayback = ({ audioPath, onPlaybackComplete }) => {
   useEffect(() => {
     const playAudio = async () => {
       try {
-        if (soundObject.current._loading) {
+        // Unload the sound object if it's already loaded
+        if (soundObject.current._loaded) {
           await soundObject.current.unloadAsync();
         }
+
         console.log(`Loading audio from path: ${audioPath}`);
         await soundObject.current.loadAsync({ uri: audioPath });
         console.log(`Playing audio from path: ${audioPath}`);
+
         await soundObject.current.playAsync();
-        soundObject.current.setOnPlaybackStatusUpdate((status) => {
+
+        soundObject.current.setOnPlaybackStatusUpdate(async (status) => {
           if (status.didJustFinish) {
+            console.log("Audio playback finished");
             onPlaybackComplete();
-            soundObject.current.unloadAsync();
+            // Ensure unloading after playback completes
+            await soundObject.current.unloadAsync();
           }
         });
       } catch (error) {
@@ -29,9 +34,11 @@ const AudioPlayback = ({ audioPath, onPlaybackComplete }) => {
 
     playAudio();
 
-    // Cleanup function to unload the sound object
+    // Cleanup function to unload the sound object when the component unmounts
     return () => {
-      soundObject.current.unloadAsync();
+      soundObject.current.unloadAsync().catch((error) => {
+        console.error("Error unloading sound object:", error);
+      });
     };
   }, [audioPath, onPlaybackComplete]);
 

@@ -9,7 +9,7 @@ const RecordingControl = ({ toggleRecording, recording }) => {
       <TouchableOpacity onPress={toggleRecording}>
         <FontAwesome
           name="microphone"
-          size={80}
+          size={60}
           color={recording ? "red" : "white"}
           style={styles.microphoneIcon}
         />
@@ -24,8 +24,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-around"
   },
   microphoneIcon: {
-    marginTop: 60,
-    marginBottom: 30
+    marginTop: 10,
+    marginBottom: 30,
+    marginHorizontal: 40
   }
 });
 

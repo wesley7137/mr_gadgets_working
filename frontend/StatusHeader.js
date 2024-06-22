@@ -15,14 +15,6 @@ const StatusHeader = ({ status, isConnected, startConnections }) => {
           { backgroundColor: connectionStatusColor }
         ]}
       />
-      <TouchableOpacity onPress={startConnections}>
-        <FontAwesome
-          name="refresh"
-          size={30}
-          color="white"
-          style={styles.refreshButton}
-        />
-      </TouchableOpacity>
     </View>
   );
 };
