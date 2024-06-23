@@ -76,12 +76,12 @@ async def process_audio_queue():
                         bytes_buffer = io.BytesIO()
                         tts.tts_to_file(
                             text=chunk,
-                            speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\jake.wav",
+                            speaker_wav="D:\\mr_gadget_nexus3\\backend\\utils\\tts\\colin.wav",
                             file_path=bytes_buffer,
-                            speed=1.6,
-                            temperature=1.0,
-                            top_k=95,
-                            top_p=0.9,
+                            speed=1.5,
+                            temperature=0.5,
+                            top_k=50,
+                            top_p=0.5,
                             language="en"
                         )
                         audio_data = bytes_buffer.getvalue()
@@ -91,7 +91,8 @@ async def process_audio_queue():
                         base64_audio = base64.b64encode(audio_data).decode('utf-8')
                         await manager.send_message(websocket, {
                             'type': 'audio',
-                            'audio': base64_audio
+                            'audio': base64_audio,
+                            'text': response_text
                         })
                         logger.info("Sent TTS audio data to websocket")
                     except Exception as e:
@@ -139,6 +140,7 @@ async def handle_websocket(websocket: WebSocket, model: str):
 
                 # Enqueue the response for audio processing
                 audio_queue.put((websocket, response_string))
+                return 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
