@@ -9,7 +9,8 @@ import {
   ScrollView,
   TouchableOpacity,
   Pressable,
-  LogBox
+  LogBox,
+  Alert
 } from "react-native";
 import { Audio, InterruptionModeIOS } from "expo-av";
 import PagerView from "react-native-pager-view";
@@ -25,6 +26,7 @@ const WEBSOCKET_ROUTES = {
   model1: "/ws/interpreter",
   model2: "/ws/finn"
 };
+const KILL_SWITCH_URL = "http://localhost:8015/kill_interpreter"; // Add this line
 
 const App = () => {
   const [isConnected, setIsConnected] = useState(false);
@@ -34,6 +36,10 @@ const App = () => {
   const websocket = useRef(null);
   const [selectedModel, setSelectedModel] = useState("model1");
   const pagerRef = useRef(null);
+  const scrollViewRef = useRef(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [codeOutput, setCodeOutput] = useState("");
+  const [activeTab, setActiveTab] = useState(0);
 
   const {
     audioQueue,
@@ -42,6 +48,17 @@ const App = () => {
     addToQueue,
     clearQueue
   } = useAudioQueue();
+
+  const handleKillSwitch = async () => {
+    try {
+      const response = await fetch(KILL_SWITCH_URL, { method: "POST" });
+      const data = await response.Alert.alert("Kill Switch", data.message);
+      refreshConnection();
+    } catch (error) {
+      console.error("Failed to trigger kill switch", error);
+      Alert.alert("Error", "Failed to trigger kill switch");
+    }
+  };
 
   const connectWebSocket = useCallback(() => {
     console.log("Connecting to WebSocket...");
@@ -64,15 +81,26 @@ const App = () => {
     };
 
     websocket.current.onmessage = (event) => {
-      console.log("WebSocket message received:", event.data);
+      console.log("Received WebSocket message:", event.data);
       const data = JSON.parse(event.data);
       if (data.type === "audio") {
         console.log("Received audio data");
         const audioUri = `data:audio/mp3;base64,${data.audio}`;
         addToQueue(audioUri);
-      } else if (data.type === "text") {
+      }
+      if (data.type === "text") {
         console.log("Received text data:", data.text);
         setResponseText((prevText) => prevText + data.text);
+      }
+      if (data.type === "response") {
+        console.log("Received response data:", data.text);
+        setResponseText(data.text);
+        setIsProcessing(false);
+      }
+      if (data.type === "error") {
+        console.error("Received error:", data.text);
+        setResponseText(`Error: ${data.text}`);
+        setIsProcessing(false);
       }
     };
   }, [selectedModel, addToQueue]);
@@ -85,6 +113,16 @@ const App = () => {
       }
     };
   }, [connectWebSocket]);
+
+  useEffect(() => {
+    // Scroll to the bottom when responseText changes
+    if (scrollViewRef.current) {
+      // Use setTimeout to ensure the scroll happens after the layout update
+      setTimeout(() => {
+        scrollViewRef.current.scrollToEnd({ animated: true });
+      }, 100);
+    }
+  }, [responseText]);
 
   const startRecording = async () => {
     console.log("Starting audio recording...");
@@ -132,6 +170,7 @@ const App = () => {
 
   const sendAudioToServer = async (uri) => {
     console.log("Sending audio to server...");
+    setIsProcessing(true);
     try {
       const response = await fetch(uri);
       const blob = await response.blob();
@@ -147,9 +186,9 @@ const App = () => {
       reader.readAsDataURL(blob);
     } catch (error) {
       console.error("Failed to send audio", error);
+      setIsProcessing(false);
     }
   };
-
   const toggleRecording = () => {
     if (status === "Recording") {
       stopRecording();
@@ -201,31 +240,52 @@ const App = () => {
         />
         <View style={styles.tabButtons}>
           <Pressable
-            style={styles.tabButton}
-            onPress={() => pagerRef.current.setPage(0)}
+            style={[
+              styles.tabButton,
+              activeTab === 0 && styles.activeTabButton
+            ]}
+            onPress={() => setActiveTab(0)}
           >
             <Text style={styles.tabButtonText}>Response</Text>
           </Pressable>
           <Pressable
-            style={styles.tabButton}
-            onPress={() => pagerRef.current.setPage(1)}
+            style={[
+              styles.tabButton,
+              activeTab === 1 && styles.activeTabButton
+            ]}
+            onPress={() => setActiveTab(1)}
           >
             <Text style={styles.tabButtonText}>Code</Text>
           </Pressable>
         </View>
-        <PagerView style={styles.pagerView} initialPage={0} ref={pagerRef}>
+        <PagerView
+          style={styles.pagerView}
+          initialPage={0}
+          ref={pagerRef}
+          onPageSelected={(e) => setActiveTab(e.nativeEvent.position)}
+        >
           <View key="1" style={styles.page}>
-            <ScrollView style={styles.responseContainer}>
+            <ScrollView
+              ref={scrollViewRef}
+              style={styles.responseContainer}
+              contentContainerStyle={styles.responseContentContainer}
+            >
               <Text style={styles.response}>{responseText}</Text>
-              {status === "Processing" && (
+              {isProcessing && (
                 <ActivityIndicator size="large" color="#0000ff" />
               )}
             </ScrollView>
           </View>
           <View key="2" style={styles.page}>
-            <View style={styles.scene}>
-              <Text>Second Tab Content</Text>
-            </View>
+            <ScrollView
+              style={styles.responseContainer}
+              contentContainerStyle={styles.responseContentContainer}
+            >
+              <Text style={styles.response}>{codeOutput}</Text>
+              {isProcessing && (
+                <ActivityIndicator size="large" color="#0000ff" />
+              )}
+            </ScrollView>
           </View>
         </PagerView>
         <View style={styles.footer}>
@@ -240,6 +300,13 @@ const App = () => {
             toggleRecording={toggleRecording}
             recording={status === "Recording"}
           />
+          <TouchableOpacity
+            style={styles.killSwitchButton}
+            onPress={handleKillSwitch}
+          >
+            <FontAwesome name="power-off" size={24} color="white" />
+            <Text style={styles.killSwitchButtonText}>Kill</Text>
+          </TouchableOpacity>
         </View>
         {currentFilePath && (
           <AudioPlayback
@@ -264,9 +331,11 @@ const styles = StyleSheet.create({
   },
   status: {
     textAlign: "center",
-    fontSize: 18,
+    fontSize: 25,
+    fontWeight: "bold",
     marginVertical: 10,
-    color: "white"
+    color: "#04ff00",
+    marginBotton: 30
   },
   tabButtons: {
     flexDirection: "row",
@@ -293,16 +362,24 @@ const styles = StyleSheet.create({
   page: {
     flex: 1,
     padding: 10,
-    backgroundColor: "rgba(255, 255, 255, 0.9)",
     borderRadius: 10
   },
   responseContainer: {
-    flex: 1
+    flex: 1,
+    backgroundColor: "rgba(59, 59, 59, 0.848)",
+    borderRadius: 15
+  },
+  responseContentContainer: {
+    flexGrow: 1,
+    justifyContent: "flex-end",
+    padding: 10
   },
   response: {
     fontSize: 16,
-    color: "#333",
-    marginVertical: 10
+    color: "#ffffff",
+    marginVertical: 10,
+    lineHeight: 25,
+    padding: 10
   },
   footer: {
     flexDirection: "row",
@@ -315,17 +392,34 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#28a745",
     padding: 10,
-    borderRadius: 5
+    borderRadius: 5,
+    marginLeft: 30,
+    marginBotton: 30
   },
   refreshButtonText: {
     color: "white",
     fontSize: 16,
-    marginLeft: 5
+    marginLeft: 10
   },
   scene: {
     justifyContent: "center",
     alignItems: "center",
     height: "100%"
+  },
+  activeTabButton: {
+    backgroundColor: "#1e88e5"
+  },
+  killSwitchButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#dc3545",
+    padding: 10,
+    marginRight: 30
+  },
+  killSwitchButtonText: {
+    color: "white",
+    fontSize: 16,
+    marginLeft: 10
   }
 });
 
